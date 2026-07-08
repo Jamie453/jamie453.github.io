@@ -163,18 +163,25 @@ const NOTE_DIFFS = {
 };
 
 /* ================= chord data ================= */
-// pitch-class note names; black keys prefer the common root spellings
+// pitch-class note names; used as a last-resort fallback when spelling
 const SHARP_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
 const FLAT_NAMES  = ["C","Db","D","Eb","E","F","Gb","G","Ab","A","Bb","B"];
-// roots: pc, display name, and whether their chord tones spell better with flats
-const ROOTS = [
-  { pc:0,  name:"C",  flat:false }, { pc:1,  name:"Db", flat:true  },
-  { pc:2,  name:"D",  flat:false }, { pc:3,  name:"Eb", flat:true  },
-  { pc:4,  name:"E",  flat:false }, { pc:5,  name:"F",  flat:true  },
-  { pc:6,  name:"F#", flat:false }, { pc:7,  name:"G",  flat:false },
-  { pc:8,  name:"Ab", flat:true  }, { pc:9,  name:"A",  flat:false },
-  { pc:10, name:"Bb", flat:true  }, { pc:11, name:"B",  flat:false },
+// each pitch class can be named more than one way (enharmonics) — both may appear as chord roots
+const ROOT_VARIANTS = [
+  [{name:"C", flat:false}],
+  [{name:"C#",flat:false},{name:"Db",flat:true }],
+  [{name:"D", flat:false}],
+  [{name:"Eb",flat:true },{name:"D#",flat:false}],
+  [{name:"E", flat:false}],
+  [{name:"F", flat:true }],
+  [{name:"F#",flat:false},{name:"Gb",flat:true }],
+  [{name:"G", flat:false}],
+  [{name:"Ab",flat:true },{name:"G#",flat:false}],
+  [{name:"A", flat:false}],
+  [{name:"Bb",flat:true },{name:"A#",flat:false}],
+  [{name:"B", flat:false}],
 ];
+const ALL_PCS = [0,1,2,3,4,5,6,7,8,9,10,11];
 const WHITE_PCS = [0,2,4,5,7,9,11];
 
 // chord tones as [semitones, letter-steps] so each tone gets its proper diatonic spelling
@@ -197,8 +204,9 @@ const CHORD_TYPES = {
 };
 
 const NATURAL_PC = { C:0, D:2, E:4, F:5, G:7, A:9, B:11 };
-// spell one chord tone: letter comes from the interval degree, accidental from the pitch
-function spellTone(root, semi, deg) {
+// spell one chord tone: letter comes from the interval degree, accidental from the pitch.
+// strict=true returns null instead of falling back when a double accidental would be needed.
+function spellTone(root, semi, deg, strict) {
   const li = LETTERS.indexOf(root.name[0]);
   const tl = LETTERS[(li + deg) % 7];
   const targetPc = (root.pc + semi) % 12;
@@ -208,28 +216,45 @@ function spellTone(root, semi, deg) {
   if (acc === 0) return tl;
   if (acc === 1) return tl + "#";
   if (acc === -1) return tl + "b";
-  // would need a double accidental (e.g. Cdim7's Bbb) — fall back to the simple enharmonic
+  // would need a double accidental (e.g. Cdim7's Bbb)
+  if (strict) return null;
   return (root.flat ? FLAT_NAMES : SHARP_NAMES)[targetPc];
+}
+
+// pick a root name for this pitch class that spells the whole chord without
+// double accidentals — so pc 6 becomes "Gb major" (Gb Bb Db) but "F# minor"
+// (F# A C#), never a spelling that needs F## or Bbb. Where both names spell
+// cleanly (C# major / Db major), one is chosen at random for variety.
+function spellChord(pc, typeKey) {
+  const t = CHORD_TYPES[typeKey];
+  const variants = ROOT_VARIANTS[pc].map(v => ({ ...v, pc }));
+  const order = Math.random() < 0.5 ? variants : [...variants].reverse();
+  for (const root of order) {
+    const spelled = t.ints.map(p => spellTone(root, p[0], p[1], true));
+    if (!spelled.includes(null)) return { root, spelled };
+  }
+  const root = order[0];
+  return { root, spelled: t.ints.map(p => spellTone(root, p[0], p[1], false)) };
 }
 
 const CHORD_DIFFS = {
   easy: {
     label: "Easy", time: 20000,
-    blurb: "Major and minor triads on natural roots (C, D, E, F, G, A, B). 20 seconds each.",
+    blurb: "Major and minor triads on all 12 roots \u2014 naturals, sharps and flats (F#, Bb, Db...). 20 seconds each.",
     types: ["maj","min"],
-    roots: ROOTS.filter(r => WHITE_PCS.includes(r.pc)),
+    rootPcs: ALL_PCS,
   },
   medium: {
     label: "Medium", time: 25000,
-    blurb: "Adds 7th chords (G7, Cmaj7, Dm7...) plus diminished and augmented triads, on all 12 roots. 25 seconds each.",
+    blurb: "Adds 7th chords (G7, C#maj7, Ebm7...) plus diminished and augmented triads. 25 seconds each.",
     types: ["maj","min","dim","aug","dom7","maj7","min7"],
-    roots: ROOTS,
+    rootPcs: ALL_PCS,
   },
   hard: {
     label: "Hard", time: 30000,
     blurb: "Everything above plus dim7, m7\u266D5, sus2, sus4, 6th and 9th chords. 30 seconds each.",
     types: ["maj","min","dim","aug","dom7","maj7","min7","dim7","m7b5","sus2","sus4","six","m6","nine"],
-    roots: ROOTS,
+    rootPcs: ALL_PCS,
   },
 };
 
@@ -266,24 +291,24 @@ function buildNoteQuestion(diff, prevKey) {
 }
 
 function buildChordQuestion(diff, prevKey) {
-  let root, typeKey, kind, key, guard = 0;
+  let pc, typeKey, kind, key, guard = 0;
   do {
     typeKey = diff.types[Math.floor(Math.random() * diff.types.length)];
     kind = Math.random() < 0.5 ? "keys" : "spell";
     const maxInt = Math.max(...CHORD_TYPES[typeKey].ints.map(p => p[0]));
     // for keyboard questions the whole chord must fit on the two rendered octaves
-    const okRoots = kind === "keys"
-      ? diff.roots.filter(r => r.pc + maxInt <= KEYBOARD_HIGH - KEYBOARD_LOW)
-      : diff.roots;
-    root = okRoots[Math.floor(Math.random() * okRoots.length)];
-    key = "c" + root.name + typeKey;
+    const okPcs = kind === "keys"
+      ? diff.rootPcs.filter(p => p + maxInt <= KEYBOARD_HIGH - KEYBOARD_LOW)
+      : diff.rootPcs;
+    pc = okPcs[Math.floor(Math.random() * okPcs.length)];
+    key = "c" + pc + typeKey; // keyed by pitch class so enharmonic names still count as a repeat
     guard++;
   } while (key === prevKey && guard < 20);
 
   const t = CHORD_TYPES[typeKey];
-  const pcs = [...new Set(t.ints.map(p => (root.pc + p[0]) % 12))];
-  const midis = t.ints.map(p => KEYBOARD_LOW + root.pc + p[0]);
-  const spelled = t.ints.map(p => spellTone(root, p[0], p[1]));
+  const { root, spelled } = spellChord(pc, typeKey);
+  const pcs = [...new Set(t.ints.map(p => (pc + p[0]) % 12))];
+  const midis = t.ints.map(p => KEYBOARD_LOW + pc + p[0]);
   return {
     q: { kind, display: t.label(root.name), pcs, midis, spelled },
     key,
